@@ -1,128 +1,85 @@
-from flask import Flask, request, render_template_string, session
-import pdfplumber
-from transformers import pipeline
-import stripe
+from flask import Flask, request, render_template_string, send_file
+import os
+import uuid
+
+try:
+    from pdf2docx import Converter
+except ImportError:
+    raise ImportError("Please install pdf2docx: pip install pdf2docx")
 
 app = Flask(__name__)
-app.secret_key = "your-secret-key"  # Replace with a random string
-summarizer = pipeline("summarization", model="distilbart-cnn-6-6")
-question_generator = pipeline("text2text-generation", model="valhalla/t5-small-qg-hl")
-stripe.api_key = "your-stripe-secret-key"  # Replace with Stripe key
-
-def extract_text_from_pdf(pdf_file):
-    text = ""
-    try:
-        with pdfplumber.open(pdf_file) as pdf:
-            for page in pdf.pages:
-                text += page.extract_text() or ""
-        if not text.strip():
-            return "No text found in PDF"
-        return text
-    except Exception as e:
-        return f"Error reading PDF: {e}"
-
-def generate_study_notes(text):
-    max_chunk_length = 300
-    words = text.split()
-    chunks = [" ".join(words[i:i + max_chunk_length]) for i in range(0, len(words), max_chunk_length)]
-    summaries = []
-    for chunk in chunks:
-        if chunk.strip():
-            try:
-                summary = summarizer(chunk, max_length=100, min_length=20, do_sample=False)[0]["summary_text"]
-                summaries.append(summary)
-            except:
-                summaries.append("Error summarizing chunk")
-    return "\n\n".join(summaries)
-
-def generate_flashcards(text):
-    summary = generate_study_notes(text)
-    try:
-        questions = question_generator(summary, max_length=80, num_return_sequences=2)
-        return [q["generated_text"] for q in questions]
-    except:
-        return ["Error generating flashcards"]
-
-def check_usage_limit():
-    if "uploads" not in session:
-        session["uploads"] = 0
-    if session["uploads"] >= 1 and not is_premium_user():
-        return False
-    session["uploads"] += 1
-    return True
-
-def is_premium_user():
-    return False  # Update with Stripe logic later
+app.secret_key = "any-string-you-like"  # You can use any string here
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
-<head><title>Study Notes App</title>
-<style>
-    body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-    button { padding: 10px; background-color: #007bff; color: white; border: none; cursor: pointer; }
-    button:hover { background-color: #0056b3; }
-</style>
+<head>
+    <title>PDF to Word Converter</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 700px; margin: 40px auto; padding: 20px; background: #f8f9fa; color: #333; }
+        h1 { color: #007bff; }
+        form { margin-bottom: 30px; }
+        input[type="file"] { margin-bottom: 10px; }
+        input[type="submit"] { padding: 10px 20px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
+        input[type="submit"]:hover { background-color: #0056b3; }
+        .message { margin-top: 20px; padding: 10px; background: #e2e3e5; border-radius: 4px; }
+        .footer { margin-top: 40px; font-size: 13px; color: #888; text-align: center; }
+    </style>
 </head>
 <body>
-    <h1>Upload a PDF to Generate Study Notes and Flashcards</h1>
+    <h1>PDF to Word Converter</h1>
     <form method="post" enctype="multipart/form-data">
-        <input type="file" name="file" accept=".pdf">
-        <input type="submit" value="Generate">
+        <input type="file" name="file" accept=".pdf" required>
+        <br>
+        <input type="submit" value="Convert to Word">
     </form>
-    <button onclick="subscribe()">Upgrade to Premium ($5/month)</button>
-    {% if notes %}
-        <h2>Study Notes</h2>
-        <p>{{ notes | replace('\n', '<br>') }}</p>
-        <h2>Flashcards</h2>
-        <ul>
-        {% for card in flashcards %}
-            <li>{{ card }}</li>
-        {% endfor %}
-        </ul>
+    {% if message %}
+        <div class="message">{{ message }}</div>
     {% endif %}
-    <script>
-    async function subscribe() {
-        const response = await fetch('/subscribe', { method: 'POST' });
-        const data = await response.json();
-        window.location = data.url;
-    }
-    </script>
+    <div class="footer">
+        <p>For best results, use text-based PDFs. Complex layouts may not convert perfectly.<br>
+        After conversion, your Word file will be downloaded automatically.</p>
+    </div>
 </body>
 </html>
 """
 
+def pdf_to_word(pdf_path, docx_path):
+    try:
+        cv = Converter(pdf_path)
+        # You can tweak these options for better results if needed
+        cv.convert(docx_path, start=0, end=None)
+        cv.close()
+    except Exception as e:
+        return f"Error converting PDF: {e}"
+    return None
+
 @app.route("/", methods=["GET", "POST"])
 def index():
-    notes = ""
-    flashcards = []
     if request.method == "POST":
-        if not check_usage_limit():
-            return render_template_string(HTML_TEMPLATE, notes="Upgrade to premium for more uploads!", flashcards=[])
-        file = request.files["file"]
-        if file and file.filename.endswith(".pdf"):
-            file.save("uploaded.pdf")
-            text = extract_text_from_pdf("uploaded.pdf")
-            if not text.startswith("Error"):
-                notes = generate_study_notes(text)
-                flashcards = generate_flashcards(text)
-            else:
-                notes = text
-    return render_template_string(HTML_TEMPLATE, notes=notes, flashcards=flashcards)
-
-@app.route("/subscribe", methods=["POST"])
-def subscribe():
-    session = stripe.checkout.Session.create(
-        payment_method_types=["card"],
-        line_items=[{
-            "price": "your-stripe-price-id",  # Replace with Stripe price ID
-            "quantity": 1,
-        }],
-        mode="subscription",
-        success_url="https://your-render-url/success",
-        cancel_url="https://your-render-url/cancel",
-    )
-    return {"url": session.url}
+        file = request.files.get("file")
+        if file and file.filename.lower().endswith(".pdf"):
+            pdf_filename = f"uploaded_{uuid.uuid4().hex}.pdf"
+            docx_filename = f"converted_{uuid.uuid4().hex}.docx"
+            file.save(pdf_filename)
+            error = pdf_to_word(pdf_filename, docx_filename)
+            os.remove(pdf_filename)
+            if error:
+                if os.path.exists(docx_filename):
+                    os.remove(docx_filename)
+                return render_template_string(HTML_TEMPLATE, message=error)
+            response = send_file(docx_filename, as_attachment=True)
+            # Clean up after sending
+            try:
+                os.remove(docx_filename)
+            except Exception:
+                pass
+            return response
+        else:
+            return render_template_string(HTML_TEMPLATE, message="Please upload a valid PDF file.")
+    return render_template_string(HTML_TEMPLATE, message="")
 
 if __name__ == "__main__":
+    # Use host='0.0.0.0' for external access, remove debug for production
     app.run(debug=True)
