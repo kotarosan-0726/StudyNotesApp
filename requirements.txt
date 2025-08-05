@@ -1,0 +1,6 @@
+pdfplumber
+transformers
+torch
+flask
+gunicorn
+stripe
